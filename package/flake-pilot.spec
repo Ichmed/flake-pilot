@@ -22,7 +22,7 @@
 # SOFTWARE.
 #
 Name:           flake-pilot
-Version:        2.2.14
+Version:        2.2.16
 Release:        0
 Summary:        Launcher for flake applications
 License:        MIT
@@ -40,7 +40,7 @@ Requires:       golang-github-containers-common
 Requires:       sudo
 Requires:       rsync
 Requires:       tar
-BuildRequires:  pandoc
+BuildRequires:  python3-docutils
 %if 0%{?suse_version}
 BuildRequires:  rust
 BuildRequires:  cargo
@@ -48,6 +48,7 @@ BuildRequires:  upx
 BuildRequires:  openssl-devel
 BuildRequires:  glibc-devel-static
 BuildRequires:  kiwi-settings
+BuildRequires:  python3-Pygments
 %endif
 %if 0%{?debian} || 0%{?ubuntu}
 BuildRequires:  rust-all
@@ -55,6 +56,7 @@ BuildRequires:  upx-ucl
 BuildRequires:  libssl-dev
 BuildRequires:  openssl
 BuildRequires:  pkg-config
+BuildRequires:  python3-pygments
 %endif
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 
