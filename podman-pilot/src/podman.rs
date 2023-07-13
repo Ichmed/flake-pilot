@@ -21,26 +21,245 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-use spinoff::{Spinner, spinners, Color};
-use yaml_rust::Yaml;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::process::exit;
-use std::env;
-use std::fs;
 use crate::app_path::program_config_file;
+use crate::config::{config, RuntimeSection};
 use crate::defaults::debug;
-use tempfile::tempfile;
-use std::io::{Write, Read};
+use spinoff::{spinners, Color, Spinner};
+use std::ffi::OsStr;
+use std::fs;
 use std::fs::File;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
+use std::process::{exit, ExitStatus, Output};
+use std::process::{Command, Stdio};
+use std::{env, result};
+use tempfile::tempfile;
+use yaml_rust::Yaml;
 
 use crate::defaults;
 
-pub fn create(
-    program_name: &String, runtime_config: &[Yaml]
-) -> Vec<String> {
+struct Sudo(Command);
+
+impl Sudo {
+    fn new() -> Self {
+        Self(Command::new("sudo"))
+    }
+
+    fn void() -> Self {
+        let mut n = Self::new();
+        n.stderr(Stdio::null()).stdout(Stdio::null());
+        n
+    }
+
+    fn user(&mut self, user: Option<&str>) -> &mut Self {
+        if let Some(user) = user {
+            self.0.arg("--user").arg(user);
+        }
+        self
+    }
+
+    fn flag(&mut self, condition: bool, arg: &str) -> &mut Self {
+        if condition {
+            self.0.arg(arg);
+        }
+        self
+    }
+
+    fn arg<S>(&mut self, arg: S) -> &mut Self
+    where
+        S: AsRef<OsStr>,
+    {
+        self.0.arg(arg);
+        self
+    }
+
+    fn debug_print(&mut self) -> &mut Self {
+        debug(&format!("{:?}", self.0.get_args()));
+        self
+    }
+}
+
+impl std::ops::Deref for Sudo {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Sudo {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct Podman {
+    pub program_name: String,
+    pub cid: String,
+    pub container_cid_file: String,
+    pub user: Option<String>,
+}
+
+impl Podman {
+    pub fn start(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Start container with the given container ID
+
+        podman-pilot exits with the return code from podman after this function
+        !*/
+        let RuntimeSection {
+            resume,
+            attach,
+            ..
+        } = config()
+            .container
+            .runtime
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+
+
+        let status_code = if self.is_running()? {
+            if attach {
+                // 1. Attach to running container
+                self.attach_instance()?
+            } else {
+                // 2. Execute app in running container
+                self.exec_instance()?
+            }
+        } else if resume {
+            // 3. Startup resume type container and execute app
+            let status_code = self.start_instance()?;
+            if status_code.success() {
+                self.exec_instance()?
+            } else {
+                status_code
+            }
+        } else {
+            // 4. Startup container
+            self.start_instance()?
+        };
+
+        Ok(status_code)
+    }
+
+    pub fn is_running(&self) -> Result<bool, PodmanError> {
+        /*!
+    Check if container with specified cid is running
+    !*/
+        let output = self.command()
+            .arg("ps")
+            .arg("--format")
+            .arg("{{.ID}}")
+            .debug_print()
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| self.cid.starts_with(line)))
+
+    }
+
+    fn command(&self) -> Sudo {
+        let mut sudo = Sudo::new();
+        sudo.user(self.user.as_deref()).arg("podman");
+        sudo
+    }
+
+    fn void(&self) -> Sudo {
+        let mut sudo = self.command();
+        sudo.stderr(Stdio::null());
+        sudo.stdout(Stdio::null());
+        sudo
+    }
+
+    pub fn start_instance(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Call container ID based podman commands
+        !*/
+
+        let mut command = self.command();
+        command.arg("start");
+        if config().resume() {
+            command.arg("--attach");
+        } else {
+            command.stdout(Stdio::null());
+        }
+
+        Ok(command
+            .arg(&self.cid)
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?
+            .status)
+    }
+
+    pub fn attach_instance(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Call container ID based podman commands
+        !*/
+        Ok(self
+            .void()
+            .arg("attach")
+            .arg(&self.cid)
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?
+            .status)
+    }
+
+    pub fn create_instance(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Call container ID based podman commands
+        !*/
+        Ok(self
+            .void()
+            .arg("create")
+            .arg(&self.cid)
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?
+            .status)
+    }
+
+    pub fn rm_instance(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Call container ID based podman commands
+        !*/
+        Ok(self
+            .void()
+            .arg("rm")
+            .arg(&self.cid)
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?
+            .status)
+    }
+
+    pub fn exec_instance(&self) -> Result<ExitStatus, FlakeError> {
+        /*!
+        Call container ID based podman commands
+        !*/
+        Ok(self
+            .command()
+            .arg("exec")
+            .arg("--interactive")
+            .arg("--tty")
+            .arg(&self.cid)
+            .arg(
+                config()
+                    .container
+                    .target_app_path
+                    .unwrap_or(&self.program_name),
+            )
+            .args(env::args().skip(1).filter(|arg| !arg.starts_with('@')))
+            .output()
+            .map_err(PodmanError::ExectuionFailed)?
+            .status)
+    }
+}
+
+pub fn create(program_name: &String) -> Podman {
     /*!
     Create container for later execution of program_name.
     The container name and all other settings to run the program
@@ -113,13 +332,10 @@ pub fn create(
         - tar-archive-file-name-to-include
     !*/
     let args: Vec<String> = env::args().collect();
-    let mut result: Vec<String> = Vec::new();
     let mut layers: Vec<String> = Vec::new();
 
     // setup container ID file name
-    let mut container_cid_file = format!(
-        "{}/{}", defaults::CONTAINER_CID_DIR, program_name
-    );
+    let mut container_cid_file = format!("{}/{}", defaults::CONTAINER_CID_DIR, program_name);
     for arg in &args[1..] {
         if arg.starts_with('@') {
             // The special @NAME argument is not passed to the
@@ -128,97 +344,64 @@ pub fn create(
             container_cid_file = format!("{}{}", container_cid_file, arg);
         }
     }
+
+    let RuntimeSection {
+        runas,
+        resume,
+        attach,
+        ..
+    } = config()
+        .container
+        .runtime
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+
     container_cid_file = format!("{}.cid", container_cid_file);
 
-    let container_section = &runtime_config[0]["container"];
-
     // check for includes
-    let include_section = &runtime_config[0]["include"];
-    let tar_includes = &include_section["tar"];
-    let has_includes = tar_includes.as_vec().is_some();
-
-    // setup podman container to use
-    if container_section["name"].as_str().is_none() {
-        error!("No 'name' attribute specified in {}",
-            program_config_file(program_name)
-        );
-        exit(1)
-    }
-    let container_name = container_section["name"].as_str().unwrap();
+    let container_name = config().container.name;
 
     // setup base container if specified
-    let container_base_name;
-    let delta_container;
-    if container_section["base_container"].as_str().is_some() {
-        // get base container name
-        container_base_name = container_section["base_container"]
-            .as_str().unwrap();
-        // get additional container layers
-        let layer_section = &container_section["layers"];
-        if layer_section.as_vec().is_some() {
-            for layer in layer_section.as_vec().unwrap() {
-                debug(&format!("Adding layer: [{}]", layer.as_str().unwrap()));
-                layers.push(layer.as_str().unwrap().to_string());
-            }
-        }
-        delta_container = true;
-    } else {
-        container_base_name = "";
-        delta_container = false;
-    }
+    if config().container.base_container.is_some() {
+        layers.extend(
+            config().container.layers.iter().map(|x| (*x).to_owned()), //.inspect(|layer| debug(&format!("Adding layer: [{layer}]")))
+        );
+    };
 
     // setup app command path name to call
-    let target_app_path = get_target_app_path(program_name, runtime_config);
-
-    // get runtime section
-    let runtime_section = &container_section["runtime"];
+    let target_app_path = config().container.target_app_path.unwrap_or(&program_name);
 
     // setup container operation mode
-    let mut resume: bool = false;
-    let mut attach: bool = false;
-    let mut runas = String::new();
 
-    if runtime_section.as_hash().is_some() {
-        if ! &runtime_section["resume"].as_bool().is_none() {
-            resume = runtime_section["resume"].as_bool().unwrap();
-        }
-        if ! &runtime_section["attach"].as_bool().is_none() {
-            attach = runtime_section["attach"].as_bool().unwrap();
-        }
-        if ! &runtime_section["runas"].as_str().is_none() {
-            runas.push_str(runtime_section["runas"].as_str().unwrap());
-        }
-    }
-
-    let mut app = Command::new("sudo");
-    if ! runas.is_empty() {
-        app.arg("--user").arg(&runas);
-    }
-    app.arg("podman").arg("create")
-        .arg("--cidfile").arg(&container_cid_file);
+    let mut app = Sudo::new();
+    app.user(runas)
+        .arg("podman")
+        .arg("create")
+        .arg("--cidfile")
+        .arg(&container_cid_file);
 
     // Make sure CID dir exists
     init_cid_dir();
 
     // Check early return condition in resume mode
-    if Path::new(&container_cid_file).exists() && gc_cid_file(&container_cid_file, &runas) && (resume || attach) {
+    if Path::new(&container_cid_file).exists()
+        && gc_cid_file(&container_cid_file, runas)
+        && (resume || attach)
+    {
         // resume or attach mode is active and container exists
         // report ID value and its ID file name
-        match fs::read_to_string(&container_cid_file) {
-            Ok(cid) => {
-                result.push(cid);
-            },
-            Err(error) => {
-                // cid file exists but could not be read
-                panic!("Error reading CID: {:?}", error);
-            }
-        }
-        result.push(container_cid_file);
-        return result;
+        let cid = fs::read_to_string(&container_cid_file).expect("Error reading CID: {:?}");
+        return Podman {
+            program_name: program_name.clone(),
+            cid,
+            container_cid_file,
+            user: runas.map(str::to_owned),
+        };
     }
 
     // Garbage collect occasionally
-    gc(&runas);
+    gc(runas);
 
     // Sanity check
     if Path::new(&container_cid_file).exists() {
@@ -226,424 +409,276 @@ pub fn create(
         // cid file already exists. podman create will fail with
         // an error but will also create the container which is
         // unwanted. Thus we check this condition here
-        error!(
-            "Container id in use by another instance, consider @NAME argument"
-        );
+        error!("Container id in use by another instance, consider @NAME argument");
         exit(1)
     }
 
-    // create the container with configured runtime arguments
-    let mut has_runtime_arguments: bool = false;
-    if runtime_section.as_hash().is_some() {
-        let podman_section = &runtime_section["podman"];
-        if let Some(podman_section) = podman_section.as_vec() {
-            has_runtime_arguments = true;
-            for opt in podman_section {
-                let mut split_opt = opt.as_str().unwrap().splitn(2, ' ');
-                let opt_name = split_opt.next();
-                let opt_value = split_opt.next();
-                app.arg(opt_name.unwrap());
-                if let Some(opt_value) = opt_value {
-                    app.arg(opt_value);
-                }
-            }
-        }
-    }
-
-    // setup default runtime arguments if not configured
-    if ! has_runtime_arguments {
-        if resume {
-            app.arg("-ti");
-        } else {
-            app.arg("--rm").arg("-ti");
-        }
-    }
+    // create the container with configured runtime argumentsS
+    if let Some(ref runtime) = config().container.runtime {
+        app.args(runtime.podman.iter().flat_map(|x| x.splitn(2, ' ')));
+    } else if resume {
+        app.arg("-ti");
+    } else {
+        app.arg("--rm").arg("-ti");
+    };
 
     // setup container name to use
-    if delta_container {
-        app.arg(container_base_name);
-    } else {
-        app.arg(container_name);
-    }
+    app.arg(config().container.base_container.unwrap_or(container_name));
 
     // setup entry point
     if resume {
         // create the container with a sleep entry point
         // to keep it in running state
-        app.arg("sleep");
-    } else if target_app_path != "/" {
-        app.arg(target_app_path);
-    }
-
-    // setup program arguments
-    if resume {
+        //
         // sleep "forever" ... I will be dead by the time this sleep ends ;)
         // keeps the container in running state to accept podman exec for
         // running the app multiple times with different arguments
-        app.arg("4294967295d");
+        app.arg("sleep").arg("4294967295d");
     } else {
-        for arg in &args[1..] {
-            if ! arg.starts_with('@') {
-                app.arg(arg);
-            }
+        if target_app_path != "/" {
+            app.arg(target_app_path);
         }
+
+        app.args(args[1..].iter().filter(|arg| !arg.starts_with('@')));
     }
 
     // create container
     debug(&format!("{:?}", app.get_args()));
-    let spinner = Spinner::new(
-        spinners::Line, "Launching flake...", Color::Yellow
-    );
-    match app.output() {
-        Ok(output) => {
-            if output.status.success() {
-                let cid = String::from_utf8_lossy(&output.stdout)
-                    .strip_suffix('\n').unwrap().to_string();
-                result.push(cid);
-                result.push(container_cid_file);
-
-                if delta_container || has_includes {
-                    debug("Mounting instance for provisioning workload");
-                    let mut provision_ok = true;
-                    let instance_mount_point = mount_container(
-                        &result[0], &runas, false
-                    );
-
-                    if delta_container {
-                        // Create tmpfile to hold accumulated removed data
-                        let removed_files: File;
-                        match tempfile() {
-                            Ok(file) => {
-                                removed_files = file
-                            },
-                            Err(error) => {
-                                spinner.fail("Flake launch has failed");
-                                panic!("Failed to create tempfile: {}", error)
-                            }
-                        }
-                        debug("Provisioning delta container...");
-                        update_removed_files(
-                            &instance_mount_point, &removed_files
-                        );
-                        debug(&format!(
-                            "Adding main app [{}] to layer list", container_name
-                        ));
-                        layers.push(container_name.to_string());
-                        for layer in layers {
-                            debug(&format!(
-                                "Syncing delta dependencies [{}]...", layer
-                            ));
-                            let app_mount_point = mount_container(
-                                &layer, &runas, true
-                            );
-                            update_removed_files(
-                                &app_mount_point, &removed_files
-                            );
-                            provision_ok = sync_delta(
-                                &app_mount_point, &instance_mount_point, &runas
-                            );
-                            umount_container(&layer, &runas, true);
-                            if ! provision_ok {
-                                break
-                            }
-                        }
-                        if provision_ok {
-                            debug("Syncing host dependencies...");
-                            provision_ok = sync_host(
-                                &instance_mount_point, &removed_files, &runas
-                            )
-                        }
-                        umount_container(&result[0], &runas, false);
-                    }
-
-                    if has_includes && provision_ok {
-                        debug("Syncing includes...");
-                        provision_ok = sync_includes(
-                            &instance_mount_point, runtime_config, &runas
-                        )
-                    }
-
-                    if ! provision_ok {
-                        spinner.fail("Flake launch has failed");
-                        panic!("Failed to provision container")
-                    }
-                }
-                spinner.success("Launching flake");
-                return result;
-            }
+    let spinner = Spinner::new(spinners::Line, "Launching flake...", Color::Yellow);
+    match launch_flake(
+        program_name,
+        &mut app,
+        &container_cid_file,
+        runas,
+        layers,
+        container_name,
+    ) {
+        Ok(result) => {
+            spinner.success("Launching flake");
+            result
+        }
+        Err(err) => {
             spinner.fail("Flake launch has failed");
-            panic!(
-                "Failed to create container: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        },
-        Err(error) => {
-            spinner.fail("Flake launch has failed");
-            panic!("Failed to execute podman: {:?}", error)
+            todo!()
         }
     }
 }
 
-pub fn start(
-    program_name: &str, runtime_config: &[Yaml], cid: &str
-) {
-    /*!
-    Start container with the given container ID
+#[derive(Debug)]
+pub enum FlakeError {
+    ProvisionContainerFailed(std::io::Error),
+    CreateContainerFailed,
+    PodmanExecutionFailed(PodmanError),
+    FailedToCreateTempFile(std::io::Error),
+}
 
-    podman-pilot exits with the return code from podman after this function
-    !*/
-    let container_section = &runtime_config[0]["container"];
-    let runtime_section = &container_section["runtime"];
+impl From<PodmanError> for FlakeError {
+    fn from(value: PodmanError) -> Self {
+        Self::PodmanExecutionFailed(value)
+    }
+}
 
-    let resume = runtime_section.as_hash().and(runtime_section["resume"].as_bool()).unwrap_or_default();
-    let attach = runtime_section.as_hash().and(runtime_section["attach"].as_bool()).unwrap_or_default();
-    let runas = runtime_section.as_hash().and(runtime_section["runas"].as_str()).unwrap_or_default().to_owned();
-    
-    let is_running = container_running(cid, &runas);
+fn launch_flake(
+    program_name: &str,
+    app: &mut Command,
+    container_cid_file: &str,
+    runas: Option<&str>,
+    mut layers: Vec<String>,
+    container_name: &str,
+) -> Result<Podman, FlakeError> {
+    let output = app.output().map_err(PodmanError::ExectuionFailed)?;
+    if !output.status.success() {
+        return Err(FlakeError::CreateContainerFailed);
+    }
+    let cid = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_owned();
 
-    let status_code = if is_running {
-
-        if attach {
-            // 1. Attach to running container
-            call_instance(
-                "attach", cid, program_name, runtime_config, &runas
-            )
-        } else {
-            // 2. Execute app in running container
-            call_instance(
-                "exec", cid, program_name, runtime_config, &runas
-            )
-        }
-    } else if resume {
-        // 3. Startup resume type container and execute app
-        let status_code = call_instance(
-            "start", cid, program_name, runtime_config, &runas
-        );
-        if status_code == 0 {
-            call_instance(
-                "exec", cid, program_name, runtime_config, &runas
-            )
-        } else { status_code }
-    } else {
-        // 4. Startup container
-        call_instance(
-            "start", cid, program_name, runtime_config, &runas
-        )
+    let result = Podman {
+        program_name: program_name.to_owned(),
+        cid: cid.clone(),
+        container_cid_file: container_cid_file.to_owned(),
+        user: runas.map(str::to_owned),
     };
 
-    exit(status_code)
-}
+    let tars = &config().tar;
 
-pub fn get_target_app_path(
-    program_name: &str, runtime_config: &[Yaml]
-) -> String {
-    /*!
-    setup application command path name
+    if config().is_delta_container() || !tars.is_empty() {
+        debug("Mounting instance for provisioning workload");
+        let mut provision_ok = true;
+        let instance_mount_point = mount_container(&cid, runas, false)?;
 
-    This is either the program name specified at registration
-    time or the configured target application from the flake
-    configuration file
-    !*/
+        if config().is_delta_container() {
+            // Create tmpfile to hold accumulated removed data
+            let mut removed_files = tempfile().map_err(FlakeError::FailedToCreateTempFile)?;
 
-    runtime_config[0]["container"]["target_app_path"].as_str().unwrap_or(program_name).to_owned()
-}
+            debug("Provisioning delta container...");
+            update_removed_files(&instance_mount_point, &removed_files);
+            debug(&format!("Adding main app [{container_name}] to layer list"));
 
-pub fn call_instance(
-    action: &str, cid: &str, program_name: &str,
-    runtime_config: &[Yaml], user: &str
-) -> i32 {
-    /*!
-    Call container ID based podman commands
-    !*/
-    let args: Vec<String> = env::args().collect();
-    let container_section = &runtime_config[0]["container"];
-    let runtime_section = &container_section["runtime"];
-    let mut resume: bool = false;
-    if runtime_section.as_hash().is_some() && ! &runtime_section["resume"].as_bool().is_none() {
-        resume = runtime_section["resume"].as_bool().unwrap();
-    }
-    let mut call = Command::new("sudo");
-    if action == "create" || action == "rm" {
-        call.stderr(Stdio::null());
-        call.stdout(Stdio::null());
-    }
-    if ! user.is_empty() {
-        call.arg("--user").arg(user);
-    }
-    call.arg("podman").arg(action);
-    if action == "exec" {
-        call.arg("--interactive");
-        call.arg("--tty");
-    }
-    if action == "start" && ! resume {
-        call.arg("--attach");
-    } else if action == "start" {
-        // start detached, we are not interested in the
-        // start output in this case
-        call.stdout(Stdio::null());
-    }
-    call.arg(cid);
-    if action == "exec" {
-        call.arg(
-            get_target_app_path(program_name, runtime_config)
-        );
-        for arg in &args[1..] {
-            if ! arg.starts_with('@') {
-                call.arg(arg);
+            layers.push(container_name.to_owned());
+
+            provision_ok = layers
+                .iter()
+                .inspect(|layer| debug(&format!("Syncing delta dependencies [{layer}]...")))
+                .map(|layer| sync_layer(layer, &instance_mount_point, runas, &mut removed_files))
+                .all(|ok| ok.unwrap()); //TODO
+
+            if provision_ok {
+                debug("Syncing host dependencies...");
+                provision_ok = sync_host(&instance_mount_point, &removed_files, runas)
             }
+            umount_container(&cid, runas, false);
+        }
+
+        if !tars.is_empty() && provision_ok {
+            debug("Syncing includes...");
+            provision_ok = sync_includes(&instance_mount_point, runas).unwrap();
+            // todo
+        }
+
+        if !provision_ok {
+            panic!("Failed to provision container")
         }
     }
-    let mut status_code = 255;
-    debug(&format!("{:?}", call.get_args()));
-    match call.status() {
-        Ok(status) => {
-            status_code = status.code().unwrap();
-        },
-        Err(error) => {
-            error!("Failed to execute podman {}: {:?}", action, error)
-        }
-    }
-    status_code
+    return Ok(result);
 }
 
-pub fn mount_container(
-    container_name: &str, user: &String, as_image: bool
-) -> String {
+fn sync_layer(
+    layer: &str,
+    instance_mount_point: &str,
+    user: Option<&str>,
+    removed_files: &mut File,
+) -> Result<bool, FlakeError> {
+    let mount_point = mount_container(&layer, user, true)?;
+    update_removed_files(&mount_point, removed_files);
+    let ok = sync_delta(&mount_point, instance_mount_point, user).unwrap(); //todo
+    umount_container(&layer, user, true);
+    Ok(ok)
+}
+
+#[derive(Debug)]
+pub enum PodmanError {
+    ExectuionFailed(std::io::Error),
+    MountFailed(String),
+    // "Failed to execute podman image umount: {:?}"
+    // let mut status_code = 255;
+    UnmountFailed(std::io::Error),
+}
+
+fn mount_container(
+    container_name: &str,
+    user: Option<&str>,
+    as_image: bool,
+) -> Result<String, PodmanError> {
     /*!
     Mount container and return mount point
     !*/
-    let mut call = Command::new("sudo");
-    if ! user.is_empty() {
-        call.arg("--user").arg(user);
+
+    if as_image && !container_image_exists(container_name, user) {
+        pull(container_name, user);
     }
-    if as_image {
-        if ! container_image_exists(container_name, user) {
-            pull(container_name, user);
-        }
-        call.arg("podman").arg("image").arg("mount").arg(container_name);
+
+    let output = Sudo::new()
+        .user(user)
+        .arg("podman")
+        .flag(as_image, "image")
+        .arg("mount")
+        .arg(container_name)
+        .debug_print()
+        .output()
+        .map_err(PodmanError::ExectuionFailed)?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches('\n')
+            .to_owned())
     } else {
-        call.arg("podman").arg("mount").arg(container_name);
-    }
-    debug(&format!("{:?}", call.get_args()));
-    match call.output() {
-        Ok(output) => {
-            if output.status.success() {
-                return String::from_utf8_lossy(&output.stdout)
-                    .strip_suffix('\n').unwrap().to_string()
-            }
-            panic!(
-                "Failed to mount container image: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        },
-        Err(error) => {
-            panic!("Failed to execute podman: {:?}", error)
-        }
+        Err(PodmanError::MountFailed(
+            String::from_utf8_lossy(&output.stderr)
+                .trim_end_matches('\n')
+                .to_owned(),
+        ))
     }
 }
 
 pub fn umount_container(
-    mount_point: &str, user: &String, as_image: bool
-) -> i32 {
+    mount_point: &str,
+    user: Option<&str>,
+    as_image: bool,
+) -> Result<ExitStatus, PodmanError> {
     /*!
     Umount container image
     !*/
-    let mut call = Command::new("sudo");
-    call.stderr(Stdio::null());
-    call.stdout(Stdio::null());
-    if ! user.is_empty() {
-        call.arg("--user").arg(user);
-    }
-    if as_image {
-        call.arg("podman").arg("image").arg("umount").arg(mount_point);
-    } else {
-        call.arg("podman").arg("umount").arg(mount_point);
-    }
-    let mut status_code = 255;
-    debug(&format!("{:?}", call.get_args()));
-    match call.status() {
-        Ok(status) => {
-            status_code = status.code().unwrap();
-        },
-        Err(error) => {
-            error!("Failed to execute podman image umount: {:?}", error)
-        }
-    }
-    status_code
+    Sudo::void()
+        .user(user)
+        .arg("podman")
+        .flag(as_image, "image")
+        .arg("umount")
+        .arg(mount_point)
+        .debug_print()
+        .status()
+        .map_err(PodmanError::UnmountFailed)
 }
 
-pub fn sync_includes(
-    target: &String, runtime_config: &[Yaml], user: &String
-) -> bool {
+#[derive(Debug)]
+pub struct TarError(std::io::Error);
+
+pub fn sync_includes(target: &String, user: Option<&str>) -> Result<bool, TarError> {
     /*!
     Sync custom include data to target path
     !*/
-    let include_section = &runtime_config[0]["include"];
-    let tar_includes = &include_section["tar"];
-    let mut status_code = 0;
-    if tar_includes.as_vec().is_some() {
-        for tar in tar_includes.as_vec().unwrap() {
-            debug(&format!("Adding tar include: [{}]", tar.as_str().unwrap()));
-            let mut call = Command::new("sudo");
-            if ! user.is_empty() {
-                call.arg("--user").arg(user);
-            }
-            call.arg("tar")
-                .arg("-C").arg(target)
-                .arg("-xf").arg(tar.as_str().unwrap());
-            debug(&format!("{:?}", call.get_args()));
-            match call.output() {
-                Ok(output) => {
-                    debug(&String::from_utf8_lossy(&output.stdout));
-                    debug(&String::from_utf8_lossy(&output.stderr));
-                    status_code = output.status.code().unwrap();
-                },
-                Err(error) => {
-                    panic!("Failed to execute tar: {:?}", error)
-                }
-            }
-        }
-    }
-    if status_code == 0 {
-        return true
-    }
-    false
+    let result: Result<Vec<_>, _> = config()
+        .tar
+        .iter()
+        .map(|tar| {
+            debug(&format!("Adding tar include: [{tar}]"));
+            Sudo::new()
+                .user(user)
+                .arg("tar")
+                .arg("-C")
+                .arg(target)
+                .arg("-xf")
+                .arg(tar)
+                .debug_print()
+                .output()
+                .map_err(TarError)
+        })
+        .collect();
+
+    Ok(result?
+        .iter()
+        .map(|output| {
+            debug(&String::from_utf8_lossy(&output.stdout));
+            debug(&String::from_utf8_lossy(&output.stderr));
+            output.status
+        })
+        .all(|status| status.success()))
 }
 
-pub fn sync_delta(
-    source: &String, target: &String, user: &String
-) -> bool {
+#[derive(Debug)]
+pub struct RSyncError(std::io::Error);
+
+pub fn sync_delta(source: &String, target: &str, user: Option<&str>) -> Result<bool, RSyncError> {
     /*!
     Sync data from source path to target path
     !*/
-    let mut call = Command::new("sudo");
-    if ! user.is_empty() {
-        call.arg("--user").arg(user);
-    }
-    call.arg("rsync")
+
+    let output = Sudo::new()
+        .user(user)
+        .arg("rsync")
         .arg("-av")
-        .arg(format!("{}/", &source))
-        .arg(format!("{}/", &target));
-    let status_code;
-    debug(&format!("{:?}", call.get_args()));
-    match call.output() {
-        Ok(output) => {
-            debug(&String::from_utf8_lossy(&output.stdout));
-            status_code = output.status.code().unwrap();
-        },
-        Err(error) => {
-            panic!("Failed to execute rsync: {:?}", error)
-        }
-    }
-    if status_code == 0 {
-        return true
-    }
-    false
+        .arg(&format!("{}/", &source))
+        .arg(&format!("{}/", &target))
+        .debug_print()
+        .output()
+        .map_err(RSyncError)?;
+
+    debug(&String::from_utf8_lossy(&output.stdout));
+    Ok(output.status.success())
 }
 
-pub fn sync_host(
-    target: &String, mut removed_files: &File, user: &String
-) -> bool {
+pub fn sync_host(target: &String, mut removed_files: &File, user: Option<&str>) -> bool {
     /*!
     Sync files/dirs specified in target/defaults::HOST_DEPENDENCIES
     from the running host to the target path
@@ -655,120 +690,100 @@ pub fn sync_host(
         Ok(_) => {
             if removed_files_contents.is_empty() {
                 debug("There are no host dependencies to resolve");
-                return true
+                return true;
             }
             match File::create(&host_deps) {
-                Ok(mut removed) => {
-                    match removed.write_all(removed_files_contents.as_bytes()) {
-                        Ok(_) => { },
-                        Err(error) => {
-                            panic!("Write failed {}: {:?}", host_deps, error);
-                        }
+                Ok(mut removed) => match removed.write_all(removed_files_contents.as_bytes()) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        panic!("Write failed {}: {:?}", host_deps, error);
                     }
                 },
                 Err(error) => {
                     panic!("Error creating {}: {:?}", host_deps, error);
                 }
             }
-        },
+        }
         Err(error) => {
             panic!("Error reading from file descriptor: {:?}", error);
         }
     }
-    let mut call = Command::new("sudo");
-    if ! user.is_empty() {
-        call.arg("--user").arg(user);
-    }
-    call.arg("rsync")
+    let mut call = Sudo::new();
+    call.user(user)
+        .arg("rsync")
         .arg("-av")
         .arg("--ignore-missing-args")
-        .arg("--files-from").arg(&host_deps)
+        .arg("--files-from")
+        .arg(&host_deps)
         .arg("/")
-        .arg(format!("{}/", &target));
+        .arg(&format!("{}/", &target));
     let status_code;
     debug(&format!("{:?}", call.get_args()));
     match call.output() {
         Ok(output) => {
             debug(&String::from_utf8_lossy(&output.stdout));
             status_code = output.status.code().unwrap();
-        },
+        }
         Err(error) => {
             panic!("Failed to execute rsync: {:?}", error)
         }
     }
     if status_code == 0 {
-        return true
+        return true;
     }
     false
 }
 
 pub fn init_cid_dir() {
-    if ! Path::new(defaults::CONTAINER_CID_DIR).is_dir() {
-        if ! chmod(defaults::CONTAINER_DIR, "755", "root") {
+    if !Path::new(defaults::CONTAINER_CID_DIR).is_dir() {
+        if !chmod(defaults::CONTAINER_DIR, "755", "root") {
             panic!(
                 "Failed to set permissions 755 on {}",
                 defaults::CONTAINER_DIR
             );
         }
-        if ! mkdir(defaults::CONTAINER_CID_DIR, "777", "root") {
-            panic!(
-                "Failed to create CID dir: {}",
-                defaults::CONTAINER_CID_DIR
-            );
+        if !mkdir(defaults::CONTAINER_CID_DIR, "777", "root") {
+            panic!("Failed to create CID dir: {}", defaults::CONTAINER_CID_DIR);
         }
     }
 }
 
-pub fn container_running(cid: &str, user: &String) -> bool {
+pub fn container_running(cid: &str, user: Option<&str>) -> Result<bool, PodmanError> {
     /*!
     Check if container with specified cid is running
     !*/
-    let mut running_status = false;
-    let mut running = Command::new("sudo");
-    if ! user.is_empty() {
-        running.arg("--user").arg(user);
-    }
-    running.arg("podman")
-        .arg("ps").arg("--format").arg("{{.ID}}");
-    debug(&format!("{:?}", running.get_args()));
-    match running.output() {
-        Ok(output) => {
-            let mut running_cids = String::new();
-            running_cids.push_str(
-                &String::from_utf8_lossy(&output.stdout)
-            );
-            for running_cid in running_cids.lines() {
-                if cid.starts_with(running_cid) {
-                    running_status = true;
-                    break
-                }
-            }
-        },
-        Err(error) => {
-            panic!("Failed to execute podman ps: {:?}", error)
-        }
-    }
-    running_status
+    let output = Sudo::new()
+        .user(user)
+        .arg("podman")
+        .arg("ps")
+        .arg("--format")
+        .arg("{{.ID}}")
+        .debug_print()
+        .output()
+        .map_err(PodmanError::ExectuionFailed)?;
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| cid.starts_with(line)))
 }
 
-pub fn container_image_exists(name: &str, user: &str) -> bool {
+pub fn container_image_exists(name: &str, user: Option<&str>) -> bool {
     /*!
     Check if container image is present in local registry
     !*/
     let mut exists_status = false;
     let mut exists = Command::new("sudo");
-    if ! user.is_empty() {
+    if let Some(user) = user {
         exists.arg("--user").arg(user);
     }
-    exists.arg("podman")
-        .arg("image").arg("exists").arg(name);
+    exists.arg("podman").arg("image").arg("exists").arg(name);
     debug(&format!("{:?}", exists.get_args()));
     match exists.status() {
         Ok(status) => {
             if status.code().unwrap() == 0 {
                 exists_status = true
             }
-        },
+        }
         Err(error) => {
             panic!("Failed to execute podman image exists: {:?}", error)
         }
@@ -776,32 +791,32 @@ pub fn container_image_exists(name: &str, user: &str) -> bool {
     exists_status
 }
 
-pub fn pull(uri: &str, user: &str) {
+pub fn pull(uri: &str, user: Option<&str>) {
     /*!
     Call podman pull and prune with the provided uri
     !*/
     let mut pull = Command::new("sudo");
-    if ! user.is_empty() {
+    if let Some(user) = user {
         pull.arg("--user").arg(user);
     }
     pull.arg("podman").arg("pull").arg(uri);
     debug(&format!("{:?}", pull.get_args()));
     match pull.output() {
         Ok(output) => {
-            if ! output.status.success() {
+            if !output.status.success() {
                 panic!(
                     "Failed to fetch container: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
             } else {
                 let mut prune = Command::new("sudo");
-                if ! user.is_empty() {
+                if let Some(user) = user {
                     prune.arg("--user").arg(user);
                 }
                 prune.arg("podman").arg("image").arg("prune").arg("--force");
                 match prune.status() {
-                    Ok(status) => { debug(&format!("{:?}", status)) },
-                    Err(error) => { debug(&format!("{:?}", error)) }
+                    Ok(status) => debug(&format!("{:?}", status)),
+                    Err(error) => debug(&format!("{:?}", error)),
                 }
             }
         }
@@ -811,9 +826,7 @@ pub fn pull(uri: &str, user: &str) {
     }
 }
 
-pub fn update_removed_files(
-    target: &String, mut accumulated_file: &File
-) {
+pub fn update_removed_files(target: &String, mut accumulated_file: &File) {
     /*!
     Take the contents of the given removed_file and append it
     to the accumulated_file
@@ -826,12 +839,12 @@ pub fn update_removed_files(
                 debug("Adding host deps...");
                 debug(&String::from_utf8_lossy(data.as_bytes()));
                 match accumulated_file.write_all(data.as_bytes()) {
-                    Ok(_) => { },
+                    Ok(_) => {}
                     Err(error) => {
                         panic!("Writing to descriptor failed: {:?}", error);
                     }
                 }
-            },
+            }
             Err(error) => {
                 // host_deps file exists but could not be read
                 panic!("Error reading {}: {:?}", host_deps, error);
@@ -840,7 +853,7 @@ pub fn update_removed_files(
     }
 }
 
-pub fn gc_cid_file(container_cid_file: &String, user: &String) -> bool {
+pub fn gc_cid_file(container_cid_file: &String, user: Option<&str>) -> bool {
     /*!
     Check if container exists according to the specified
     container_cid_file. Garbage cleanup the container_cid_file
@@ -851,16 +864,19 @@ pub fn gc_cid_file(container_cid_file: &String, user: &String) -> bool {
     match fs::read_to_string(container_cid_file) {
         Ok(cid) => {
             let mut exists = Command::new("sudo");
-            if ! user.is_empty() {
+            if let Some(user) = user {
                 exists.arg("--user").arg(user);
             }
-            exists.arg("podman")
-                .arg("container").arg("exists").arg(&cid);
+            exists
+                .arg("podman")
+                .arg("container")
+                .arg("exists")
+                .arg(&cid);
             match exists.status() {
                 Ok(status) => {
                     if status.code().unwrap() != 0 {
                         match fs::remove_file(container_cid_file) {
-                            Ok(_) => { },
+                            Ok(_) => {}
                             Err(error) => {
                                 error!("Failed to remove CID: {:?}", error)
                             }
@@ -868,15 +884,12 @@ pub fn gc_cid_file(container_cid_file: &String, user: &String) -> bool {
                     } else {
                         cid_status = true
                     }
-                },
+                }
                 Err(error) => {
-                    error!(
-                        "Failed to execute podman container exists: {:?}",
-                        error
-                    )
+                    error!("Failed to execute podman container exists: {:?}", error)
                 }
             }
-        },
+        }
         Err(error) => {
             error!("Error reading CID: {:?}", error);
         }
@@ -889,15 +902,15 @@ pub fn chmod(filename: &str, mode: &str, user: &str) -> bool {
     Chmod filename via sudo
     !*/
     let mut call = Command::new("sudo");
-    if ! user.is_empty() {
+    if !user.is_empty() {
         call.arg("--user").arg(user);
     }
     call.arg("chmod").arg(mode).arg(filename);
     match call.status() {
-        Ok(_) => { },
+        Ok(_) => {}
         Err(error) => {
             error!("Failed to chmod: {}: {:?}", filename, error);
-            return false
+            return false;
         }
     }
     true
@@ -908,21 +921,21 @@ pub fn mkdir(dirname: &str, mode: &str, user: &str) -> bool {
     Make directory via sudo
     !*/
     let mut call = Command::new("sudo");
-    if ! user.is_empty() {
+    if !user.is_empty() {
         call.arg("--user").arg(user);
     }
     call.arg("mkdir").arg("-p").arg("-m").arg(mode).arg(dirname);
     match call.status() {
-        Ok(_) => { },
+        Ok(_) => {}
         Err(error) => {
             error!("Failed to mkdir: {}: {:?}", dirname, error);
-            return false
+            return false;
         }
     }
     true
 }
 
-pub fn gc(user: &String) {
+pub fn gc(user: Option<&str>) {
     /*!
     Garbage collect CID files for which no container exists anymore
     !*/
@@ -934,7 +947,7 @@ pub fn gc(user: &String) {
         cid_file_count += 1;
     }
     if cid_file_count <= defaults::GC_THRESHOLD {
-        return
+        return;
     }
     for container_cid_file in cid_file_names {
         gc_cid_file(&container_cid_file, user);

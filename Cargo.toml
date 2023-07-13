@@ -1,2 +1,10 @@
 [workspace]
 members = ["flake-ctl", "podman-pilot", "firecracker-pilot", "firecracker-pilot/guestvm-tools/sci", "firecracker-pilot/firecracker-service/*"]
+
+[profile.release]
+# strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
