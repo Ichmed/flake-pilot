@@ -28,20 +28,24 @@ extern crate log;
 pub mod tests;
 
 use env_logger::Env;
+use podman::FlakeError;
 
 pub mod app_path;
 pub mod podman;
 pub mod defaults;
 pub mod config;
+pub mod files;
+pub mod user;
+pub mod sudo;
 
-fn main() {
+fn main() -> Result<(), FlakeError>{
     setup_logger();
 
     let program_path = app_path::program_abs_path();
     let program_name = app_path::basename(&program_path);
 
-    let container = podman::create(&program_name);
-    container.start();
+    let container = podman::create(&program_name)?;
+    container.start()    
 }
 
 fn setup_logger() {

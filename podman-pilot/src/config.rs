@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{env, path::PathBuf, sync::OnceLock, fs};
 
-use crate::defaults;
+use crate::{defaults, user::User};
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -89,7 +89,8 @@ pub struct RuntimeSection<'a> {
     /// of the container engine is performed by sudo.
     /// The behavior of sudo can be controlled via the
     /// file /etc/sudoers
-    pub runas: Option<&'a str>,
+    #[serde(borrow)]
+    pub runas: User<'a>,
 
     /// Resume the container from previous execution.
     ///
