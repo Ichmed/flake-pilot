@@ -1,15 +1,18 @@
+use lazy_static::lazy_static;
 use serde::Deserialize;
-use std::{env, path::PathBuf, sync::OnceLock, fs};
+use std::{env, path::PathBuf, fs};
 
 use crate::{defaults, user::User};
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
+lazy_static! {
+    static ref CONFIG: Config<'static> = load_config();
+}
 
 /// Returns the config singleton
 /// 
 /// Will initialize the config on first call and return the cached version afterwards
 pub fn config() -> &'static Config<'static> {
-    CONFIG.get_or_init(load_config)
+    &CONFIG
 }
 
 fn get_base_path() -> PathBuf {
