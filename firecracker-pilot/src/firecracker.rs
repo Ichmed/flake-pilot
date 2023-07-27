@@ -27,15 +27,14 @@ use yaml_rust::Yaml;
 use std::path::Path;
 use std::process::{Command, Stdio, exit, id};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use crate::defaults::{debug, is_debug};
 use tempfile::{NamedTempFile, tempdir};
-use std::io::{Write, SeekFrom, Seek};
+use std::io::{Write, SeekFrom, Seek, Read};
 use std::fs::File;
 use ubyte::ByteUnit;
 use serde::{Serialize, Deserialize};
 use serde_json::{self};
-use rand::Rng;
 
 use crate::defaults;
 
@@ -376,7 +375,7 @@ pub fn start(
     if is_running {
         // 1. Execute app in running VM
         status_code = execute_command_at_instance(
-            program_name, runtime_config, &runas, get_exec_port()
+            program_name, runtime_config, &runas, get_exec_port().expect("could not generate port number")
         );
     } else {
         match NamedTempFile::new() {
@@ -391,7 +390,7 @@ pub fn start(
                         &firecracker_config, vm_id_file, &runas, is_blocking
                     );
                     status_code = execute_command_at_instance(
-                        program_name, runtime_config, &runas, get_exec_port()
+                        program_name, runtime_config, &runas, get_exec_port().expect("could not generate port number")
                     );
                 } else {
                     // 3. Startup VM and execute app
@@ -477,17 +476,48 @@ pub fn call_instance(
     status_code
 }
 
-pub fn get_exec_port() -> u32 {
-    /*!
-    Create random execution port
-    !*/
-    let mut random = rand::thread_rng();
-    // FIXME: A more stable version
-    // should check for already running socket connections
-    // and if the same number is used for an already running one
-    // another rand should be called
+#[derive(Debug)]
+struct PortError(std::io::Error);
+
+impl From<std::io::Error> for PortError {
+    fn from(value: std::io::Error) -> Self {
+        PortError(value)
+    }
+}
+
+/// Try to find the next free port by reading in the last generated port 
+/// and incrementing it.
+/// 
+/// Loops the port number if the allowed range is exceeded.
+fn get_exec_port() -> Result<u32, PortError> {
+    let port_range = defaults::PORT_RANGE;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(defaults::PORT_FILE)?;
+
+    let port: u32 = {
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        buf.parse().unwrap_or_default()
+
+    };
+
+    let port = port + 1;
     
-    random.gen_range(49200..60000)
+    let port = if !port_range.contains(&port) {
+        port_range.start
+    } else {
+        port
+    };
+
+    
+    file.rewind()?;
+    file.write(port.to_string().as_bytes())?;
+    debug(&format!("Using port {port}"));
+    Ok(port)
 }
 
 pub fn check_connected(program_name: &String, user: &String) -> i32 {

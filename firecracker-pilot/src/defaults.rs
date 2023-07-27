@@ -21,7 +21,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-use std::env;
+use std::{env, ops::Range};
 
 pub const IMAGE_ROOT: &str =
     "image";
@@ -51,6 +51,12 @@ pub const RETRIES: u32 =
     60;
 pub const VM_WAIT_TIMEOUT_MSEC: u64 =
     1000;
+pub const PORT_RANGE: Range<u32> = 
+    49200..60000;
+pub const PORT_FILE_DIR: &str = 
+    "/run";
+pub const PORT_FILE: &str = 
+    "/run/flake_firecracker_port";
 
 pub fn is_debug() -> bool {
     env::var("PILOT_DEBUG").is_ok()
