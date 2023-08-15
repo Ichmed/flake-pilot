@@ -39,6 +39,7 @@ sourcetar:
 	cp -a doc package/flake-pilot/
 	cp -a utils package/flake-pilot/
 	cp -a vendor package/flake-pilot/
+	cp Cargo.toml package/flake-pilot/
 	tar -C package -cf package/flake-pilot.tar flake-pilot
 	rm -rf package/flake-pilot
 
