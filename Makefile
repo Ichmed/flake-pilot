@@ -27,12 +27,7 @@ package: clean vendor sourcetar
 	@echo "Find package data at package/build"
 
 vendor:
-	(cd podman-pilot && cargo vendor)
-	(cd firecracker-pilot && cargo vendor)
-	(cd flake-ctl && cargo vendor)
-	(cd firecracker-pilot/firecracker-service/service && cargo vendor)
-	(cd firecracker-pilot/firecracker-service/service-communication && cargo vendor)
-	(cd firecracker-pilot/guestvm-tools/sci && cargo vendor)
+	cargo vendor
 
 sourcetar:
 	rm -rf package/flake-pilot
@@ -43,6 +38,7 @@ sourcetar:
 	cp -a firecracker-pilot package/flake-pilot/
 	cp -a doc package/flake-pilot/
 	cp -a utils package/flake-pilot/
+	cp -a vendor package/flake-pilot/
 	tar -C package -cf package/flake-pilot.tar flake-pilot
 	rm -rf package/flake-pilot
 
