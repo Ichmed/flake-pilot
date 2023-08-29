@@ -87,7 +87,7 @@ pub struct FireCrackerVsock {
     pub uds_path: String
 }
 
-pub fn create(program_name: &String) -> Result<(String, PathBuf), FlakeError> {
+pub fn create(program_name: &str) -> Result<(String, PathBuf), FlakeError> {
     /*!
     Create VM for later execution of program_name.
     The VM name and all other settings to run the program
@@ -159,11 +159,7 @@ pub fn create(program_name: &String) -> Result<(String, PathBuf), FlakeError> {
     let vm_id_file_path = defaults::FIRECRACKER_VMID_DIR.join(program_name).with_extension("vmid");
 
     // get flake config sections
-    let RuntimeSection { runas, resume, firecracker: engine_section, .. } = config().runtime();
-
-    // check for includes
-    let tar_includes = config().tars();
-    let has_includes = !tar_includes.is_empty();
+    let RuntimeSection { runas, resume, .. } = config().runtime();
 
     // Make sure meta dirs exists
     init_meta_dirs()?;
@@ -191,7 +187,7 @@ pub fn create(program_name: &String) -> Result<(String, PathBuf), FlakeError> {
         spinners::Line, "Launching flake...", Color::Yellow, spinoff::Streams::Stderr
     );
 
-    match run_creation(&vm_id_file_path, program_name, engine_section, resume, runas, has_includes) {
+    match run_creation(&vm_id_file_path, program_name) {
         Ok(result) => {
             spinner.success("Launching flake");
             Ok(result)
@@ -205,13 +201,9 @@ pub fn create(program_name: &String) -> Result<(String, PathBuf), FlakeError> {
 
 fn run_creation(
     vm_id_file_path: &Path,
-    program_name: &String,
-    engine_section: EngineSection,
-    resume: bool,
-    runas: User,
-    has_includes: bool
+    program_name: &str
 ) -> Result<(String, PathBuf), FlakeError> {
-
+    let RuntimeSection { runas, resume, firecracker } = config().runtime();
 
     // Create initial vm_id_file with process ID set to 0
     
@@ -221,7 +213,7 @@ fn run_creation(
     // Setup root overlay if configured
     
     let vm_overlay_file = defaults::FIRECRACKER_OVERLAY_DIR.join(program_name).with_extension("ext2");
-    if let Some(overlay_size) = engine_section.overlay_size {
+    if let Some(overlay_size) = firecracker.overlay_size {
         let overlay_size = overlay_size.parse::<ByteUnit>().expect("could not parse overlay size").as_u64();
         if !vm_overlay_file.exists() || !resume {
 
@@ -239,7 +231,7 @@ fn run_creation(
     }
 
     // Provision VM
-    let vm_image_file = Path::new(engine_section.rootfs_image_path);
+    let vm_image_file = Path::new(firecracker.rootfs_image_path);
     
     let tmp_dir = tempdir()?;
     let vm_mount_point = mount_vm(
@@ -248,7 +240,7 @@ fn run_creation(
         &vm_overlay_file,
         User::ROOT
     )?;
-    if has_includes {
+    if !config().tars().is_empty() {
         debug("Syncing includes...");
         sync_includes(&vm_mount_point, User::ROOT)?;
     }
@@ -259,7 +251,7 @@ fn run_creation(
 }
 
 pub fn start(
-    program_name: &String, (vm_id, vm_id_file): (String, PathBuf)
+    program_name: &str, (vm_id, vm_id_file): (String, PathBuf)
 ) -> Result<(), FlakeError> {
     /*!
     Start VM with the given VM ID
@@ -269,33 +261,19 @@ pub fn start(
     !*/
     let RuntimeSection { runas, resume, .. } = config().runtime();
 
-    let mut is_blocking: bool = true;
-
-
     if vm_running(&vm_id, runas)? {
         // 1. Execute app in running VM
-        execute_command_at_instance(
-            program_name, runas, get_exec_port()
-        )?;
+        execute_command_at_instance(program_name, runas, get_exec_port())?;
     } else {
         let firecracker_config = NamedTempFile::new()?;
-        create_firecracker_config(
-            program_name, &firecracker_config
-        )?;
+        create_firecracker_config(program_name, &firecracker_config)?;
         if resume {
             // 2. Startup resume type VM and execute app
-            is_blocking = false;
-            call_instance(
-                &firecracker_config, &vm_id_file, runas, is_blocking
-            )?;
-            execute_command_at_instance(
-                program_name, runas, get_exec_port()
-            )?;
+            call_instance(&firecracker_config, &vm_id_file, runas, false)?;
+            execute_command_at_instance(program_name, runas, get_exec_port())?;
         } else {
             // 3. Startup VM and execute app
-            call_instance(
-                &firecracker_config, &vm_id_file, runas, is_blocking
-            )?;
+            call_instance(&firecracker_config, &vm_id_file, runas, true)?;
         }
         
     }
@@ -352,7 +330,7 @@ pub fn get_exec_port() -> u32 {
     random.gen_range(49200..60000)
 }
 
-pub fn check_connected(program_name: &String, user: User) -> Result<(), FlakeError> {
+pub fn check_connected(program_name: &str, user: User) -> Result<(), FlakeError> {
     /*!
     Check if instance connection is OK
     !*/
@@ -389,7 +367,7 @@ pub fn check_connected(program_name: &String, user: User) -> Result<(), FlakeErr
 }
 
 pub fn send_command_to_instance(
-    program_name: &String, user: User, exec_port: u32
+    program_name: &str, user: User, exec_port: u32
 ) -> i32 {
     /*!
     Send command to the VM via a vsock
@@ -446,7 +424,7 @@ pub fn send_command_to_instance(
 }
 
 pub fn execute_command_at_instance(
-    program_name: &String, user: User, exec_port: u32
+    program_name: &str, user: User, exec_port: u32
 ) -> Result<(), FlakeError> {
     /*!
     Send command to a vsoc connected to a running instance
@@ -492,7 +470,7 @@ pub fn execute_command_at_instance(
 }
 
 pub fn create_firecracker_config(
-    program_name: &String,
+    program_name: &str,
     config_file: &NamedTempFile
 ) -> Result<(), FlakeError> {
     /*!
@@ -648,7 +626,7 @@ pub fn get_run_cmdline(
     run
 }
 
-pub fn vm_running(vmid: &String, user: User) -> Result<bool, FlakeError> {
+pub fn vm_running(vmid: &str, user: User) -> Result<bool, FlakeError> {
     /*!
     Check if VM with specified vmid is running
     !*/
@@ -664,7 +642,7 @@ pub fn vm_running(vmid: &String, user: User) -> Result<bool, FlakeError> {
     Ok(output.status.success())
 }
 
-pub fn get_meta_name(program_name: &String) -> String {
+pub fn get_meta_name(program_name: &str) -> String {
     /*!
     Construct meta data basename from given program name
     !*/
@@ -682,7 +660,7 @@ pub fn get_meta_name(program_name: &String) -> String {
 }
 
 pub fn gc_meta_files(
-    vm_id_file: &Path, user: User, program_name: &String, resume: bool
+    vm_id_file: &Path, user: User, program_name: &str, resume: bool
 ) -> Result<bool, FlakeError> {
     /*!
     Check if VM exists according to the specified
@@ -731,7 +709,7 @@ pub fn gc_meta_files(
     Ok(vmid_status)
 }
 
-pub fn gc(user: User, program_name: &String) -> Result<(), FlakeError> {
+pub fn gc(user: User, program_name: &str) -> Result<(), FlakeError> {
     /*!
     Garbage collect VMID files for which no VM exists anymore
     !*/
@@ -754,7 +732,7 @@ pub fn gc(user: User, program_name: &String) -> Result<(), FlakeError> {
     Ok(())
 }
 
-pub fn delete_file(filename: &String, user: User) -> bool {
+pub fn delete_file(filename: &str, user: User) -> bool {
     /*!
     Delete file via sudo
     !*/
@@ -777,9 +755,8 @@ pub fn sync_includes(
     /*!
     Sync custom include data to target path
     !*/
-    let tar_includes = &config().tars();
     
-    for tar in tar_includes {
+    for tar in config().tars() {
         debug(&format!("Adding tar include: [{}]", tar));
         let mut call = user.run("tar");
         call.arg("-C").arg(target)
