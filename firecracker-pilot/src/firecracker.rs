@@ -822,84 +822,38 @@ pub fn sync_includes(
 }
 
 pub fn mount_vm(
-    sub_dir: &str, rootfs_image_path: &str,
-    overlay_path: &str, user: User
-) -> Result<String, FlakeError> {
+    sub_dir: &Path, rootfs_image_path: &Path,
+    overlay_path: &Path, user: User
+) -> Result<PathBuf, FlakeError> {
     /*!
     Mount VM with overlay below given sub_dir
     !*/
-    // 1. create overlay image mount structure
-    [
-        defaults::IMAGE_ROOT,
-        defaults::IMAGE_OVERLAY
-    ].iter()
-        .map(|p| format!("{}/{}", sub_dir, p))
-        .filter(|path| !Path::new(path).exists())
-        .map(fs::create_dir_all)
-        .collect::<std::io::Result<_>>()?;
 
-    // 2. mount VM image
-    let image_mount_point = format!(
-        "{}/{}", sub_dir, defaults::IMAGE_ROOT
-    );
-    let mut mount_image = user.run("mount");
-    mount_image.arg(rootfs_image_path)
-        .arg(&image_mount_point);
-    debug(&format!("{:?}", mount_image.get_args()));
-    mount_image.perform()?;
-    // 3. mount Overlay image
-    let overlay_mount_point = format!(
-        "{}/{}", sub_dir, defaults::IMAGE_OVERLAY
-    );
-    let mut mount_overlay = user.run("mount");
-    mount_overlay.arg(overlay_path)
-        .arg(&overlay_mount_point);
-    debug(&format!("{:?}", mount_overlay.get_args()));
-    mount_overlay.perform()?;
-    // 4. mount as overlay
-    [
-        defaults::OVERLAY_ROOT,
-        defaults::OVERLAY_UPPER,
-        defaults::OVERLAY_WORK
-    ].iter()
-        .map(|p| format!("{}/{}", sub_dir, p))
-        .filter(|path| !Path::new(path).exists())
-        .map(|path| mkdir(&path, "755", User::ROOT))
-        .collect::<Result<(), CommandError>>()?;
+    // Mount VM image
+    let image_mount_point = sub_dir.join(*defaults::IMAGE_ROOT);
+    mount(rootfs_image_path, &image_mount_point, user)?;
     
-    let root_mount_point = format!("{}/{}", sub_dir, defaults::OVERLAY_ROOT);
-    let mut mount_overlay = user.run("mount");
-    mount_overlay.arg("-t")
-        .arg("overlay")
-        .arg("overlayfs")
-        .arg("-o")
-        .arg(format!("lowerdir={},upperdir={}/{},workdir={}/{}",
-            &image_mount_point,
-            sub_dir, defaults::OVERLAY_UPPER,
-            sub_dir, defaults::OVERLAY_WORK
-        ))
-        .arg(&root_mount_point);
-    debug(&format!("{:?}", mount_overlay.get_args()));
-    mount_overlay.perform()?;
+    // Mount Overlay image
+    mount(overlay_path, sub_dir.join(*defaults::IMAGE_OVERLAY), user)?;
+    
+    // Mount as overlay
+    let root_mount_point = sub_dir.join(*defaults::OVERLAY_ROOT);
+    let upperdir = sub_dir.join(*defaults::OVERLAY_UPPER);
+    let workdir = sub_dir.join(*defaults::OVERLAY_WORK);
+    mount_overlay(&image_mount_point, upperdir, workdir, &root_mount_point, user)?;
+
     Ok(root_mount_point)
 }
 
-pub fn umount_vm(sub_dir: &str, user: User) -> Result<(), CommandError> {
+pub fn umount_vm(sub_dir: &Path, user: User) -> Result<(), FlakeError> {
     /*!
     Umount VM image
     !*/
     let x: Vec<_> = [
-        defaults::OVERLAY_ROOT,
-        defaults::IMAGE_OVERLAY,
-        defaults::IMAGE_ROOT,
-    ].iter().map(|mount_point| {
-        let mut umount = user.run("umount");
-        umount.stderr(Stdio::null());
-        umount.stdout(Stdio::null());
-        umount.arg(format!("{}/{}", &sub_dir, &mount_point));
-        debug(&format!("{:?}", umount.get_args()));
-        umount.perform().map(|_| ())
-    }).collect();
-
+        *defaults::OVERLAY_ROOT,
+        *defaults::IMAGE_OVERLAY,
+        *defaults::IMAGE_ROOT,
+    ].iter().map(|p| unmount(sub_dir.join(p), user)).collect();
+    // Defer short circuit logic
     x.into_iter().collect()
 }
