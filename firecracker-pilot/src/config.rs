@@ -71,12 +71,12 @@ fn config_from_str(input: &str) -> Config<'static> {
     serde_yaml::from_str(content).unwrap()
 }
 
-fn config_file(program: &str) -> String {
-    format!("{}/{}.yaml", defaults::FIRECRACKER_FLAKE_DIR, program)
+fn config_file(program: &str) -> PathBuf {
+    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension(".yaml")
 }
 
-fn config_dir(program: &str) -> String {
-    format!("{}/{}.d", defaults::FIRECRACKER_FLAKE_DIR, program)
+fn config_dir(program: &str) -> PathBuf {
+    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension(".d")
 }
 
 #[derive(Deserialize)]
@@ -216,6 +216,6 @@ vm:
     #[test]
     fn test_program_config_file() {
         let config_file = config_file("app");
-        assert_eq!("/usr/share/flakes/app.yaml", config_file);
+        assert_eq!("/usr/share/flakes/app.yaml", config_file.to_string_lossy());
     }
 }

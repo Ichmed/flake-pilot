@@ -21,36 +21,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-use std::env;
+use std::{env, path::Path};
 
-pub const IMAGE_ROOT: &str =
-    "image";
-pub const IMAGE_OVERLAY: &str =
-    "overlayroot";
-pub const OVERLAY_ROOT: &str =
-    "overlayroot/rootfs";
-pub const OVERLAY_UPPER: &str =
-    "overlayroot/rootfs_upper";
-pub const OVERLAY_WORK: &str =
-    "overlayroot/rootfs_work";
-pub const FIRECRACKER_OVERLAY_DIR:&str =
-    "/var/lib/firecracker/storage";
-pub const FIRECRACKER_TEMPLATE:&str =
-    "/etc/flakes/firecracker.json";
-pub const FIRECRACKER_FLAKE_DIR: &str =
-    "/usr/share/flakes";
-pub const FIRECRACKER_VMID_DIR: &str =
-    "/var/lib/firecracker/storage/tmp/flakes";
+use flakes::paths;
+
+paths!(
+    IMAGE_ROOT = "image";
+    IMAGE_OVERLAY = "overlayroot";
+    OVERLAY_ROOT = "overlayroot/rootfs";
+    OVERLAY_UPPER = "overlayroot/rootfs_upper";
+    OVERLAY_WORK = "overlayroot/rootfs_work";
+    FIRECRACKER_OVERLAY_DIR = "/var/lib/firecracker/storage";
+    FIRECRACKER_TEMPLATE = "/etc/flakes/firecracker.json";
+    FIRECRACKER_FLAKE_DIR = "/usr/share/flakes";
+    FIRECRACKER_VMID_DIR = "/var/lib/firecracker/storage/tmp/flakes";
+    SOCAT = "/usr/bin/socat";
+);
+
 pub const GC_THRESHOLD: usize = 20;
 pub const VM_CID: u32 = 3;
-pub const VM_PORT: u32 =
-    52;
-pub const SOCAT: &str =
-    "/usr/bin/socat";
-pub const RETRIES: u32 =
-    60;
-pub const VM_WAIT_TIMEOUT_MSEC: u64 =
-    1000;
+pub const VM_PORT: u32 = 52;
+pub const RETRIES: u32 = 60;
+pub const VM_WAIT_TIMEOUT_MSEC: u64 = 1000;
 
 pub fn is_debug() -> bool {
     env::var("PILOT_DEBUG").is_ok()
