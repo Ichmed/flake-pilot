@@ -223,7 +223,7 @@ fn run_creation(
     let vm_overlay_file = defaults::FIRECRACKER_OVERLAY_DIR.join(program_name).with_extension("ext2");
     if let Some(overlay_size) = engine_section.overlay_size {
         let overlay_size = overlay_size.parse::<ByteUnit>().expect("could not parse overlay size").as_u64();
-        if !Path::new(&vm_overlay_file).exists() || !resume {
+        if !vm_overlay_file.exists() || !resume {
 
             let mut vm_overlay_file_fd = File::create(&vm_overlay_file)?;
             vm_overlay_file_fd.seek(SeekFrom::Start(overlay_size - 1))?; // Maybe new Error for No space left on device
@@ -799,6 +799,8 @@ pub fn mount_vm(
     /*!
     Mount VM with overlay below given sub_dir
     !*/
+
+    debug("Mounting VM");
 
     // Mount VM image
     let image_mount_point = sub_dir.join(*defaults::IMAGE_ROOT);

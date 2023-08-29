@@ -2,13 +2,21 @@ use std::{fs, path::Path, process::Stdio};
 
 use crate::{command::CommandExtTrait, error::FlakeError, user::User};
 
+fn create_dir(p: impl AsRef<Path>) -> Result<(), std::io::Error> {
+    let p = p.as_ref();
+    if !p.exists() {
+        fs::create_dir_all(p)?
+    }
+    Ok(())
+}
+
 pub fn mount(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
     user: User,
 ) -> Result<(), FlakeError> {
-    fs::create_dir_all(&src)?;
-    fs::create_dir_all(&dst)?;
+    create_dir(&src)?;
+    create_dir(&dst)?;
 
     let mut mount_image = user.run("mount");
     mount_image.arg(src.as_ref()).arg(dst.as_ref());
@@ -23,10 +31,10 @@ pub fn mount_overlay(
     dst: impl AsRef<Path>,
     user: User,
 ) -> Result<(), FlakeError> {
-    fs::create_dir_all(&lowerdir)?;
-    fs::create_dir_all(&upperdir)?;
-    fs::create_dir_all(&workdir)?;
-    fs::create_dir_all(&dst)?;
+    create_dir(&lowerdir)?;
+    create_dir(&upperdir)?;
+    create_dir(&workdir)?;
+    create_dir(&dst)?;
 
     let lowerdir = format!("lowerdir={}", lowerdir.as_ref().to_string_lossy());
     let upperdir = format!("upperdir={}", upperdir.as_ref().to_string_lossy());

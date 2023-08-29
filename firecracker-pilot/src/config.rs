@@ -72,11 +72,11 @@ fn config_from_str(input: &str) -> Config<'static> {
 }
 
 fn config_file(program: &str) -> PathBuf {
-    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension(".yaml")
+    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension("yaml")
 }
 
 fn config_dir(program: &str) -> PathBuf {
-    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension(".d")
+    defaults::FIRECRACKER_FLAKE_DIR.join(program).with_extension("d")
 }
 
 #[derive(Deserialize)]
